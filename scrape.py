@@ -2,26 +2,27 @@
 Scrape all parole hearing data for NYS.
 """
 
-import pdb
 import argparse
 import csv
 import sys
+from collections import defaultdict
 
 from datetime import datetime
 from string import ascii_uppercase
-from time import localtime, mktime
 from threading import Thread
 from Queue import Queue
 
 import scrapelib
 from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
+import arrow
 
 ROOT_URL = 'http://161.11.133.89/ParoleBoardCalendar'
 DETAIL_URL = ROOT_URL + '/details.asp?nysid={number}'
 INTERVIEW_URL = ROOT_URL + '/interviews.asp?name={letter}&month={month}&year={year}'
 FORBIDDEN_HEADERS = [u'inmate name']
 CONCURRENCY = 8
+
 
 def get_existing_parolees(path):
     """
@@ -51,15 +52,12 @@ def baseurls():
     Provide URLs for the calendar going back 24 months and forward 6 months via
     generator.  Yields the URL, then the year and month it's for.
     """
-    today = localtime()
-    #for monthdiff in xrange(-25, 7):
-    for monthdiff in xrange(-2, -1):
-        year, month = localtime(mktime(
-            [today.tm_year, today.tm_mon + monthdiff, 1, 0, 0, 0, 0, 0, 0]))[:2]
-        #for letter in ascii_uppercase:
+    now = arrow.utcnow().shift(months=1)
+    start = arrow.utcnow().shift(months=-30)
+    for date in arrow.Arrow.range('month', start, now):
         for letter in ascii_uppercase:
-            yield (INTERVIEW_URL.format(letter=letter, month=str(month).zfill(2), year=year),
-                   year, month)
+            yield (INTERVIEW_URL.format(letter=letter, month=str(date.month).zfill(2), year=date.year),
+                   date.year, date.month)
 
 
 def get_general_parolee_keys(scraper, url):
@@ -114,7 +112,7 @@ def scrape_interviews(scraper):
 
     for url, year, month in baseurls():
         sys.stderr.write(url + '\n')
-		
+
         scrape = scraper.get(url)
         # pdb.set_trace()
         soup = BeautifulSoup(scrape.content, 'lxml')
@@ -147,11 +145,10 @@ def scrape_interviews(scraper):
             # As of 1/8/16, they removed NYSID column. fun!
             parolee['nysid'] = row.find('a').get('href').split('nysid=')[1]
             # Keep track of originally scheduled month/year
+            month_fixed = str(month).zfill(2)
             if parolee[u"parole board interview date"] == u'*':
                 parolee[u"parole board interview date"] = u'{}-{}-*'.format(
-                    year, '0{}'.format(month)[-2:])
-
-
+                    year, month_fixed)
             parolees.append(parolee)
 
     return parolees
@@ -194,14 +191,15 @@ def scrape_detail_parolee(parolee, scraper):
 
 
 # pylint: disable=too-many-locals
-#def scrape_details(scraper, parolee_input):
+# def scrape_details(scraper, parolee_input):
 def scrape_details(q, out, scraper):
     """
     Scrape details for specified parolees.  Returns the same list, with
     additional data.
     """
-    #out = []
-    #for existing_parolee in parolee_input:
+
+    # out = []
+    # for existing_parolee in parolee_input:
     #    parolee = existing_parolee.copy()
     def scrape_details_inner():
         while True:
@@ -217,6 +215,8 @@ def scrape_details(q, out, scraper):
             q.task_done()
 
     return scrape_details_inner
+
+
 # pylint: enable=too-many-locals
 
 def reorder_headers(supplied):
@@ -283,6 +283,7 @@ def reorder_headers(supplied):
             headers.append(header)
     headers.extend(sorted(supplied))
     return headers
+
 
 def print_data(parolees):
     """
@@ -380,6 +381,22 @@ def scrape(old_data_path, no_download):
     print_data(existing_parolees.values())
 
 
+def split_to_months(fname):
+    data_by_month = defaultdict(list)
+    with open(fname, 'rU') as csvfile:
+        reader = csv.DictReader(csvfile, delimiter=',', quotechar='"')
+        for row in reader:
+            month = row['parole board interview date'][:7]
+            if month == '*':
+                month = 'unknown'
+            data_by_month[month].append(row)
+    for k, v in data_by_month.items():
+        with open('data/by_month/{}.csv'.format(k), 'w+') as month_file:
+            writer = csv.DictWriter(month_file, reader.fieldnames)
+            writer.writeheader()
+            writer.writerows(v)
+
+
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser()
     PARSER.add_argument('input', help=u"Path to input data", nargs='?')
@@ -388,3 +405,4 @@ if __name__ == '__main__':
                         action='store_true')
     ARGS = PARSER.parse_args()
     scrape(ARGS.input, ARGS.no_download)
+    split_to_months(ARGS.input)
